@@ -38,7 +38,7 @@ export async function uploadToDrive({ callSid, callerNumber, recordingUrl, trans
 
     // Twilio requires auth to download recordings
     const twilioAuth = Buffer.from(
-      `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
+      `${process.env.SIGNALWIRE_PROJECT_ID}:${process.env.SIGNALWIRE_API_TOKEN}`
     ).toString("base64");
 
     const audioResponse = await fetch(recordingUrl, {

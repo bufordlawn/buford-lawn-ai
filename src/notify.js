@@ -1,9 +1,11 @@
 import twilio from "twilio";
 import { google } from "googleapis";
 
+// SignalWire uses the Twilio SDK but pointed at their API endpoint
 const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
+  process.env.SIGNALWIRE_PROJECT_ID,
+  process.env.SIGNALWIRE_API_TOKEN,
+  { signalwireSpaceUrl: process.env.SIGNALWIRE_SPACE_URL }
 );
 
 // ─── FORMAT GATHERED INFO FOR NOTIFICATIONS ───────────────────────────────────
@@ -52,8 +54,8 @@ async function sendSMS({ callerNumber, startTime, durationSeconds, gathered, dri
   try {
     await twilioClient.messages.create({
       body,
-      from: process.env.TWILIO_PHONE_NUMBER,
-      to: process.env.NOTIFY_SMS_NUMBER, // Your personal cell
+      from: process.env.SIGNALWIRE_PHONE_NUMBER,
+      to: process.env.NOTIFY_SMS_NUMBER,
     });
     console.log("✅ SMS notification sent");
   } catch (err) {

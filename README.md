@@ -87,12 +87,12 @@ Call ends → Recording + transcript → Google Drive
 
 ---
 
-## Step 3: Configure Twilio Webhook
+## Step 3: Configure SignalWire Webhook
 
-1. Go to Twilio Console → **Phone Numbers → Manage → Active Numbers**
-2. Click your number
-3. Under **Voice & Fax → A CALL COMES IN**, set:
-   - Type: **Webhook**
+1. Go to [bufordlcm.signalwire.com](https://bufordlcm.signalwire.com)
+2. Click **Phone Numbers** → click your number (+1 727 428 3673)
+3. Under **Voice & Fax → When a call comes in**, set:
+   - Type: **LaML Webhook**
    - URL: `https://your-app.railway.app/voice/inbound`
    - Method: **HTTP POST**
 4. Save

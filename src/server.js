@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+// SignalWire is API-compatible with Twilio — we use the Twilio SDK pointed at SignalWire
 import twilio from "twilio";
 import { speak, AUDIO_DIR } from "./speak.js";
 import { getAgentResponse, initConversation } from "./agent.js";
