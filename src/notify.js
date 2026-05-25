@@ -1,29 +1,38 @@
 import twilio from "twilio";
-import { google } from "googleapis";
+import nodemailer from "nodemailer";
 
-// SignalWire uses the Twilio SDK but pointed at their API endpoint
-const twilioClient = twilio(
+// ─── SIGNALWIRE CLIENT (uses Twilio SDK) ──────────────────────────────────────
+const signalwireClient = twilio(
   process.env.SIGNALWIRE_PROJECT_ID,
   process.env.SIGNALWIRE_API_TOKEN,
   { signalwireSpaceUrl: process.env.SIGNALWIRE_SPACE_URL }
 );
 
-// ─── FORMAT GATHERED INFO FOR NOTIFICATIONS ───────────────────────────────────
+// ─── GMAIL TRANSPORTER (App Password) ────────────────────────────────────────
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.GMAIL_USER,
+    pass: process.env.GMAIL_APP_PASSWORD,
+  },
+});
+
+// ─── FORMAT GATHERED INFO ─────────────────────────────────────────────────────
 function formatGathered(gathered) {
   const fields = [
-    ["Name", gathered.name],
-    ["Service Address", gathered.address],
-    ["Services Requested", Array.isArray(gathered.services) ? gathered.services.join(", ") : gathered.services],
-    ["Frequency", gathered.frequency],
-    ["Callback Number", gathered.callbackNumber],
-    ["Best Time to Call", gathered.bestTimeToCall],
-    ["Yard Size", gathered.yardSize],
-    ["Gated", gathered.gated],
-    ["Gate Code", gathered.gateCode],
-    ["Obstacles", gathered.obstacles],
-    ["Mulch Areas", gathered.mulchAreas],
-    ["Mulch Color", gathered.mulchColor],
-    ["Additional Notes", gathered.additionalNotes],
+    ["Name",             gathered.name],
+    ["Service Address",  gathered.address],
+    ["Services",         Array.isArray(gathered.services) ? gathered.services.join(", ") : gathered.services],
+    ["Frequency",        gathered.frequency],
+    ["Callback Number",  gathered.callbackNumber],
+    ["Best Time",        gathered.bestTimeToCall],
+    ["Yard Size",        gathered.yardSize],
+    ["Gated",            gathered.gated],
+    ["Gate Code",        gathered.gateCode],
+    ["Obstacles",        gathered.obstacles],
+    ["Mulch Areas",      gathered.mulchAreas],
+    ["Mulch Color",      gathered.mulchColor],
+    ["Notes",            gathered.additionalNotes],
   ];
 
   return fields
@@ -32,11 +41,10 @@ function formatGathered(gathered) {
     .join("\n");
 }
 
-// ─── SEND SMS VIA TWILIO ──────────────────────────────────────────────────────
+// ─── SEND SMS ─────────────────────────────────────────────────────────────────
 async function sendSMS({ callerNumber, startTime, durationSeconds, gathered, driveLinks }) {
   const duration = `${Math.floor(durationSeconds / 60)}m ${durationSeconds % 60}s`;
   const time = new Date(startTime).toLocaleString("en-US", { timeZone: "America/New_York" });
-
   const services = Array.isArray(gathered.services)
     ? gathered.services.join(", ")
     : gathered.services || "Not specified";
@@ -46,13 +54,13 @@ async function sendSMS({ callerNumber, startTime, durationSeconds, gathered, dri
   body += `Time: ${time} ET\n`;
   body += `Duration: ${duration}\n`;
   body += `Service: ${services}\n`;
-  if (gathered.name) body += `Name: ${gathered.name}\n`;
-  if (gathered.address) body += `Address: ${gathered.address}\n`;
+  if (gathered.name)           body += `Name: ${gathered.name}\n`;
+  if (gathered.address)        body += `Address: ${gathered.address}\n`;
   if (gathered.callbackNumber) body += `Callback: ${gathered.callbackNumber}\n`;
   if (driveLinks?.recordingUrl) body += `🎙 Recording: ${driveLinks.recordingUrl}`;
 
   try {
-    await twilioClient.messages.create({
+    await signalwireClient.messages.create({
       body,
       from: process.env.SIGNALWIRE_PHONE_NUMBER,
       to: process.env.NOTIFY_SMS_NUMBER,
@@ -63,81 +71,54 @@ async function sendSMS({ callerNumber, startTime, durationSeconds, gathered, dri
   }
 }
 
-// ─── SEND EMAIL VIA GMAIL API ─────────────────────────────────────────────────
+// ─── SEND EMAIL ───────────────────────────────────────────────────────────────
 async function sendEmail({ callerNumber, startTime, durationSeconds, gathered, transcriptText, driveLinks }) {
-  const auth = new google.auth.OAuth2(
-    process.env.GMAIL_CLIENT_ID,
-    process.env.GMAIL_CLIENT_SECRET
-  );
-
-  auth.setCredentials({
-    refresh_token: process.env.GMAIL_REFRESH_TOKEN,
-  });
-
-  const gmail = google.gmail({ version: "v1", auth });
-
   const duration = `${Math.floor(durationSeconds / 60)}m ${durationSeconds % 60}s`;
   const time = new Date(startTime).toLocaleString("en-US", { timeZone: "America/New_York" });
   const formattedInfo = formatGathered(gathered);
 
-  const subject = `📞 New Call Lead - ${gathered.name || callerNumber} | ${new Date(startTime).toLocaleDateString()}`;
+  const subject = `📞 New Lead - ${gathered.name || callerNumber} | ${new Date(startTime).toLocaleDateString()}`;
 
-  const bodyLines = [
-    `New inbound call received by Jordan (AI Assistant)`,
+  const text = [
+    `New inbound call handled by Jordan (AI Assistant)`,
     ``,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
     `CALL DETAILS`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-    `Caller Number : ${callerNumber}`,
-    `Date & Time   : ${time} ET`,
-    `Duration      : ${duration}`,
+    `Caller : ${callerNumber}`,
+    `Time   : ${time} ET`,
+    `Length : ${duration}`,
     ``,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-    `COLLECTED INFORMATION`,
+    `COLLECTED INFO`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-    formattedInfo || "  (No info collected)",
+    formattedInfo || "  (Nothing collected)",
     ``,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-    `GOOGLE DRIVE LINKS`,
+    `GOOGLE DRIVE`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-    driveLinks?.recordingUrl ? `Recording  : ${driveLinks.recordingUrl}` : `Recording  : Not available`,
-    driveLinks?.transcriptUrl ? `Transcript : ${driveLinks.transcriptUrl}` : `Transcript : Not available`,
+    `Recording  : ${driveLinks?.recordingUrl  || "Not available"}`,
+    `Transcript : ${driveLinks?.transcriptUrl || "Not available"}`,
     ``,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
     `FULL TRANSCRIPT`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-    transcriptText || "(No transcript available)",
+    transcriptText || "(No transcript)",
     ``,
     `---`,
-    `Sent automatically by Buford Lawn Care AI Assistant`,
-  ];
-
-  const emailBody = bodyLines.join("\n");
-
-  // Encode as base64url for Gmail API
-  const rawEmail = [
-    `From: ${process.env.GMAIL_FROM_ADDRESS}`,
-    `To: ${process.env.NOTIFY_EMAIL_ADDRESS}`,
-    `Subject: ${subject}`,
-    `Content-Type: text/plain; charset=utf-8`,
-    ``,
-    emailBody,
+    `Sent by Buford Lawn Care AI Assistant`,
   ].join("\n");
 
-  const encodedEmail = Buffer.from(rawEmail)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-
   try {
-    await gmail.users.messages.send({
-      userId: "me",
-      requestBody: { raw: encodedEmail },
+    await transporter.sendMail({
+      from: `"Buford Lawn Care AI" <${process.env.GMAIL_USER}>`,
+      to: process.env.NOTIFY_EMAIL_ADDRESS,
+      subject,
+      text,
     });
     console.log("✅ Email notification sent");
   } catch (err) {
-    console.error("Gmail send error:", err.message);
+    console.error("Email send error:", err.message);
   }
 }
 
