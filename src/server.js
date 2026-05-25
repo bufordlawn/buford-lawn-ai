@@ -1,259 +1,418 @@
 import "dotenv/config";
 import express from "express";
-// SignalWire is API-compatible with Twilio — we use the Twilio SDK pointed at SignalWire
 import twilio from "twilio";
 import { speak, AUDIO_DIR } from "./speak.js";
 import { getAgentResponse, initConversation } from "./agent.js";
 import { saveToSupabase, uploadToDrive } from "./storage.js";
 import { sendNotifications } from "./notify.js";
 import { createServer } from "http";
-import fs from "fs";
-import path from "path";
 
 const app = express();
+
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const BASE_URL = process.env.BASE_URL; // e.g. https://yourapp.railway.app
+const BASE_URL = (process.env.BASE_URL || "").replace(/\/+$/, "");
 
-// Serve generated TTS audio files so Twilio can fetch them
 app.use("/audio", express.static(AUDIO_DIR));
 
-// In-memory call sessions (fine for this scale, Supabase handles persistence)
 const sessions = new Map();
 
-// ─── SIGNALWIRE INBOUND CALL WEBHOOK TEST ────────────────────────────────────
-app.post("/voice/inbound", async (req, res) => {
-  console.log("Inbound test call received:", req.body);
-
-  res.type("text/xml");
-  res.send(`<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say>Thank you for calling Buford Lawn Care and Maintenance. This is Jordan, your virtual assistant. The test connection is working.</Say>
-  <Pause length="1"/>
-  <Say>Goodbye.</Say>
-  <Hangup/>
-</Response>`);
-});
-
+function makeTwiml() {
   const VoiceResponse = twilio.twiml.VoiceResponse;
-  const twiml = new VoiceResponse();
+  return new VoiceResponse();
+}
 
-  // Start recording the full call
-  twiml.record({
-    recordingStatusCallback: `${BASE_URL}/voice/recording-complete`,
-    recordingStatusCallbackMethod: "POST",
-  });
-
-  // Use <Connect> with a stream for real-time audio, OR use <Gather> for simpler flow
-  // We use the <Gather> loop approach — reliable, no WebSocket infra needed
-  twiml.redirect(`${BASE_URL}/voice/greet?callSid=${callSid}`);
-
+function sendXml(res, twiml) {
   res.type("text/xml");
-  res.send(twiml.toString());
+  return res.send(twiml.toString());
+}
 
-// ─── GREET CALLER ─────────────────────────────────────────────────────────────
-app.post("/voice/greet", async (req, res) => {
-  const callSid = req.query.callSid || req.body.CallSid;
-  const session = sessions.get(callSid);
+function getCallSid(req) {
+  return req.query.callSid || req.body.CallSid || req.body.callSid || `call_${Date.now()}`;
+}
 
-  const greeting =
-    "Thank you for calling Buford Lawn Care and Maintenance. My name is Jordan, a virtual assistant. How may I help you today?";
+function getCallerNumber(req) {
+  return req.body.From || req.body.Caller || req.body.from || "unknown";
+}
 
-  if (session) {
-    session.transcript.push({ role: "assistant", text: greeting });
-  }
+function actionUrl(path, callSid) {
+  return `${BASE_URL}${path}?callSid=${encodeURIComponent(callSid)}`;
+}
 
-  const audioUrl = await speak(greeting, callSid, "greeting");
-
-  const VoiceResponse = twilio.twiml.VoiceResponse;
-  const twiml = new VoiceResponse();
-
-  twiml.gather({
-    input: "speech",
-    speechTimeout: "auto",
-    speechModel: "phone_call",
-    enhanced: "true",
-    action: `${BASE_URL}/voice/respond?callSid=${callSid}`,
-    method: "POST",
-    timeout: 10,
-  }).play(audioUrl);
-
-  // If no input, prompt again
-  twiml.redirect(`${BASE_URL}/voice/no-input?callSid=${callSid}`);
-
-  res.type("text/xml");
-  res.send(twiml.toString());
-});
-
-// ─── MAIN CONVERSATION LOOP ───────────────────────────────────────────────────
-app.post("/voice/respond", async (req, res) => {
-  const callSid = req.query.callSid || req.body.CallSid;
-  const speechResult = req.body.SpeechResult || "";
-  const session = sessions.get(callSid);
-
-  console.log(`🗣  Caller said: "${speechResult}"`);
-
-  const VoiceResponse = twilio.twiml.VoiceResponse;
-  const twiml = new VoiceResponse();
+function getOrCreateSession(callSid, callerNumber) {
+  let session = sessions.get(callSid);
 
   if (!session) {
-    twiml.say("I'm sorry, something went wrong. Please call back.");
-    twiml.hangup();
-    res.type("text/xml");
-    return res.send(twiml.toString());
+    session = {
+      callSid,
+      callerNumber,
+      startTime: new Date(),
+      conversation: initConversation(),
+      gathered: {},
+      transcript: [],
+      recordingUrl: null,
+      recordingSid: null,
+    };
+
+    sessions.set(callSid, session);
   }
 
-  // Save what the caller said
-  session.transcript.push({ role: "caller", text: speechResult });
+  return session;
+}
 
-  // Get AI response
-  const { reply, isDone, gathered } = await getAgentResponse(
-    session.conversation,
-    speechResult,
-    session.gathered
-  );
+// -----------------------------------------------------------------------------
+// Inbound call handler
+// -----------------------------------------------------------------------------
+app.post("/voice/inbound", async (req, res) => {
+  try {
+    const callSid = getCallSid(req);
+    const callerNumber = getCallerNumber(req);
 
-  // Update session
-  session.transcript.push({ role: "assistant", text: reply });
-  session.gathered = { ...session.gathered, ...gathered };
+    console.log(`Inbound call from ${callerNumber} | SID: ${callSid}`);
 
-  const audioUrl = await speak(reply, callSid, `turn_${session.transcript.length}`);
+    const session = getOrCreateSession(callSid, callerNumber);
 
-  if (isDone) {
-    // Wrap up the call
-    twiml.play(audioUrl);
-    twiml.hangup();
+    const greeting =
+      "Thank you for calling Buford Lawn Care and Maintenance. My name is Jordan, your virtual assistant. How may I help you today?";
 
-    // Async post-call processing (don't await — let call hang up cleanly)
-    handleCallComplete(callSid, session).catch(console.error);
-  } else {
-    twiml.gather({
+    session.transcript.push({ role: "assistant", text: greeting });
+
+    const twiml = makeTwiml();
+
+    const gather = twiml.gather({
       input: "speech",
-      speechTimeout: "auto",
-      speechModel: "phone_call",
-      enhanced: "true",
-      action: `${BASE_URL}/voice/respond?callSid=${callSid}`,
+      action: actionUrl("/voice/respond", callSid),
       method: "POST",
-      timeout: 10,
-    }).play(audioUrl);
+      speechTimeout: "auto",
+      timeout: 8,
+    });
 
-    twiml.redirect(`${BASE_URL}/voice/no-input?callSid=${callSid}`);
+    gather.say(greeting);
+
+    twiml.redirect(
+      {
+        method: "POST",
+      },
+      actionUrl("/voice/no-input", callSid)
+    );
+
+    return sendXml(res, twiml);
+  } catch (err) {
+    console.error("Inbound call error:", err);
+
+    const twiml = makeTwiml();
+    twiml.say(
+      "I am sorry, something went wrong while answering the call. Please try again shortly."
+    );
+    twiml.hangup();
+
+    return sendXml(res, twiml);
   }
-
-  res.type("text/xml");
-  res.send(twiml.toString());
 });
 
-// ─── NO INPUT HANDLER ─────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Optional greet route
+// -----------------------------------------------------------------------------
+app.post("/voice/greet", async (req, res) => {
+  try {
+    const callSid = getCallSid(req);
+    const callerNumber = getCallerNumber(req);
+    const session = getOrCreateSession(callSid, callerNumber);
+
+    const greeting =
+      "Thank you for calling Buford Lawn Care and Maintenance. My name is Jordan, your virtual assistant. How may I help you today?";
+
+    session.transcript.push({ role: "assistant", text: greeting });
+
+    const twiml = makeTwiml();
+
+    const gather = twiml.gather({
+      input: "speech",
+      action: actionUrl("/voice/respond", callSid),
+      method: "POST",
+      speechTimeout: "auto",
+      timeout: 8,
+    });
+
+    gather.say(greeting);
+
+    twiml.redirect(
+      {
+        method: "POST",
+      },
+      actionUrl("/voice/no-input", callSid)
+    );
+
+    return sendXml(res, twiml);
+  } catch (err) {
+    console.error("Greet route error:", err);
+
+    const twiml = makeTwiml();
+    twiml.say("I am sorry, something went wrong. Please call back shortly.");
+    twiml.hangup();
+
+    return sendXml(res, twiml);
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Main conversation loop
+// -----------------------------------------------------------------------------
+app.post("/voice/respond", async (req, res) => {
+  try {
+    const callSid = getCallSid(req);
+    const callerNumber = getCallerNumber(req);
+    const speechResult = req.body.SpeechResult || "";
+    const session = getOrCreateSession(callSid, callerNumber);
+
+    console.log(`Caller said: "${speechResult}" | SID: ${callSid}`);
+
+    const twiml = makeTwiml();
+
+    if (!speechResult.trim()) {
+      twiml.redirect(
+        {
+          method: "POST",
+        },
+        actionUrl("/voice/no-input", callSid)
+      );
+
+      return sendXml(res, twiml);
+    }
+
+    session.transcript.push({ role: "caller", text: speechResult });
+
+    const agentResult = await getAgentResponse(
+      session.conversation,
+      speechResult,
+      session.gathered
+    );
+
+    const reply =
+      agentResult?.reply ||
+      "Thank you. I have that noted. What else can I help you with today?";
+
+    const isDone = Boolean(agentResult?.isDone);
+    const gathered = agentResult?.gathered || {};
+
+    session.transcript.push({ role: "assistant", text: reply });
+    session.gathered = {
+      ...session.gathered,
+      ...gathered,
+    };
+
+    let audioUrl = null;
+
+    try {
+      audioUrl = await speak(reply, callSid, `turn_${session.transcript.length}`);
+    } catch (ttsErr) {
+      console.error("TTS error, falling back to Say:", ttsErr);
+    }
+
+    if (isDone) {
+      if (audioUrl) {
+        twiml.play(audioUrl);
+      } else {
+        twiml.say(reply);
+      }
+
+      twiml.hangup();
+
+      handleCallComplete(callSid, session).catch((err) => {
+        console.error("Post-call processing failed:", err);
+      });
+
+      return sendXml(res, twiml);
+    }
+
+    const gather = twiml.gather({
+      input: "speech",
+      action: actionUrl("/voice/respond", callSid),
+      method: "POST",
+      speechTimeout: "auto",
+      timeout: 8,
+    });
+
+    if (audioUrl) {
+      gather.play(audioUrl);
+    } else {
+      gather.say(reply);
+    }
+
+    twiml.redirect(
+      {
+        method: "POST",
+      },
+      actionUrl("/voice/no-input", callSid)
+    );
+
+    return sendXml(res, twiml);
+  } catch (err) {
+    console.error("Conversation route error:", err);
+
+    const callSid = getCallSid(req);
+    const twiml = makeTwiml();
+
+    twiml.say(
+      "I am sorry, I had trouble processing that. Let me try again. What service are you calling about today?"
+    );
+
+    twiml.redirect(
+      {
+        method: "POST",
+      },
+      actionUrl("/voice/greet", callSid)
+    );
+
+    return sendXml(res, twiml);
+  }
+});
+
+// -----------------------------------------------------------------------------
+// No input handler
+// -----------------------------------------------------------------------------
 app.post("/voice/no-input", async (req, res) => {
-  const callSid = req.query.callSid || req.body.CallSid;
-  const session = sessions.get(callSid);
+  try {
+    const callSid = getCallSid(req);
 
-  const prompt = "I'm sorry, I didn't catch that. Could you please repeat?";
-  const audioUrl = await speak(prompt, callSid, "no_input");
+    const twiml = makeTwiml();
 
-  const VoiceResponse = twilio.twiml.VoiceResponse;
-  const twiml = new VoiceResponse();
+    const gather = twiml.gather({
+      input: "speech",
+      action: actionUrl("/voice/respond", callSid),
+      method: "POST",
+      speechTimeout: "auto",
+      timeout: 8,
+    });
 
-  twiml.gather({
-    input: "speech",
-    speechTimeout: "auto",
-    action: `${BASE_URL}/voice/respond?callSid=${callSid}`,
-    method: "POST",
-    timeout: 10,
-  }).play(audioUrl);
+    gather.say("I am sorry, I did not catch that. Could you please repeat?");
 
-  twiml.hangup();
+    twiml.say(
+      "I still did not hear anything. Thank you for calling Buford Lawn Care and Maintenance. Goodbye."
+    );
+    twiml.hangup();
 
-  res.type("text/xml");
-  res.send(twiml.toString());
-});
+    return sendXml(res, twiml);
+  } catch (err) {
+    console.error("No input route error:", err);
 
-// ─── RECORDING COMPLETE CALLBACK ─────────────────────────────────────────────
-app.post("/voice/recording-complete", async (req, res) => {
-  const callSid = req.body.CallSid;
-  const recordingUrl = req.body.RecordingUrl;
-  const recordingSid = req.body.RecordingSid;
+    const twiml = makeTwiml();
+    twiml.say("I am sorry, something went wrong. Goodbye.");
+    twiml.hangup();
 
-  console.log(`🎙  Recording ready for ${callSid}: ${recordingUrl}`);
-
-  const session = sessions.get(callSid);
-  if (session) {
-    session.recordingUrl = recordingUrl + ".mp3";
-    session.recordingSid = recordingSid;
+    return sendXml(res, twiml);
   }
-
-  res.sendStatus(200);
 });
 
-// ─── POST-CALL PROCESSING ─────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Recording complete callback
+// -----------------------------------------------------------------------------
+app.post("/voice/recording-complete", async (req, res) => {
+  try {
+    const callSid = req.body.CallSid;
+    const recordingUrl = req.body.RecordingUrl;
+    const recordingSid = req.body.RecordingSid;
+
+    console.log(`Recording ready for ${callSid}: ${recordingUrl}`);
+
+    const session = sessions.get(callSid);
+
+    if (session) {
+      session.recordingUrl = recordingUrl ? `${recordingUrl}.mp3` : null;
+      session.recordingSid = recordingSid || null;
+    }
+
+    return res.sendStatus(200);
+  } catch (err) {
+    console.error("Recording callback error:", err);
+    return res.sendStatus(200);
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Post-call processing
+// -----------------------------------------------------------------------------
 async function handleCallComplete(callSid, session) {
-  console.log(`✅ Processing completed call ${callSid}`);
+  console.log(`Processing completed call ${callSid}`);
 
   try {
     const endTime = new Date();
     const durationSeconds = Math.round((endTime - session.startTime) / 1000);
 
-    // Build full transcript text
     const transcriptText = session.transcript
-      .map((t) => `[${t.role.toUpperCase()}]: ${t.text}`)
+      .map((entry) => `[${entry.role.toUpperCase()}]: ${entry.text}`)
       .join("\n");
 
-    // Wait briefly for recording to be available
-    await new Promise((r) => setTimeout(r, 5000));
-
-    // Upload recording + transcript to Google Drive
     let driveLinks = {};
+
     if (session.recordingUrl) {
-      driveLinks = await uploadToDrive({
-        callSid,
-        callerNumber: session.callerNumber,
-        recordingUrl: session.recordingUrl,
-        transcriptText,
-        startTime: session.startTime,
-      });
+      try {
+        driveLinks = await uploadToDrive({
+          callSid,
+          callerNumber: session.callerNumber,
+          recordingUrl: session.recordingUrl,
+          transcriptText,
+          startTime: session.startTime,
+        });
+      } catch (driveErr) {
+        console.error("Google Drive upload failed:", driveErr);
+      }
     }
 
-    // Save summary to Supabase
-    const supabaseRecord = await saveToSupabase({
-      call_sid: callSid,
-      caller_number: session.callerNumber,
-      start_time: session.startTime.toISOString(),
-      end_time: endTime.toISOString(),
-      duration_seconds: durationSeconds,
-      transcript: transcriptText,
-      gathered_info: session.gathered,
-      recording_drive_url: driveLinks.recordingUrl || null,
-      transcript_drive_url: driveLinks.transcriptUrl || null,
-      recording_twilio_url: session.recordingUrl || null,
-    });
+    try {
+      await saveToSupabase({
+        call_sid: callSid,
+        caller_number: session.callerNumber,
+        start_time: session.startTime.toISOString(),
+        end_time: endTime.toISOString(),
+        duration_seconds: durationSeconds,
+        transcript: transcriptText,
+        gathered_info: session.gathered,
+        recording_drive_url: driveLinks.recordingUrl || null,
+        transcript_drive_url: driveLinks.transcriptUrl || null,
+        recording_twilio_url: session.recordingUrl || null,
+      });
+    } catch (supabaseErr) {
+      console.error("Supabase save failed:", supabaseErr);
+    }
 
-    // Send notifications
-    await sendNotifications({
-      callerNumber: session.callerNumber,
-      startTime: session.startTime,
-      durationSeconds,
-      gathered: session.gathered,
-      transcriptText,
-      driveLinks,
-    });
+    try {
+      await sendNotifications({
+        callerNumber: session.callerNumber,
+        startTime: session.startTime,
+        durationSeconds,
+        gathered: session.gathered,
+        transcriptText,
+        driveLinks,
+      });
+    } catch (notifyErr) {
+      console.error("Notification failed:", notifyErr);
+    }
 
-    // Clean up session from memory
     sessions.delete(callSid);
 
-    console.log(`📬 All post-call tasks complete for ${callSid}`);
+    console.log(`Post-call tasks complete for ${callSid}`);
   } catch (err) {
-    console.error(`❌ Post-call processing error for ${callSid}:`, err);
+    console.error(`Post-call processing error for ${callSid}:`, err);
   }
 }
 
-// ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
-app.get("/health", (req, res) => res.json({ status: "ok", uptime: process.uptime() }));
+// -----------------------------------------------------------------------------
+// Health check
+// -----------------------------------------------------------------------------
+app.get("/health", (req, res) => {
+  return res.json({
+    status: "ok",
+    uptime: process.uptime(),
+  });
+});
 
-// ─── START SERVER ─────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Start server
+// -----------------------------------------------------------------------------
 createServer(app).listen(PORT, () => {
-  console.log(`🚀 Buford Lawn AI server running on port ${PORT}`);
-  console.log(`📡 Base URL: ${BASE_URL}`);
+  console.log(`Buford Lawn AI server running on port ${PORT}`);
+  console.log(`Base URL: ${BASE_URL}`);
 });
