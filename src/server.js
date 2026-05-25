@@ -52,7 +52,6 @@ app.post("/voice/inbound", async (req, res) => {
 
   res.type("text/xml");
   res.send(twiml.toString());
-});
 
 // ─── GREET CALLER ─────────────────────────────────────────────────────────────
 app.post("/voice/greet", async (req, res) => {
