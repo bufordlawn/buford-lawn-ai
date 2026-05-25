@@ -23,23 +23,19 @@ app.use("/audio", express.static(AUDIO_DIR));
 // In-memory call sessions (fine for this scale, Supabase handles persistence)
 const sessions = new Map();
 
-// ─── TWILIO INBOUND CALL WEBHOOK ─────────────────────────────────────────────
-// Twilio hits this when a forwarded call comes in
+// ─── SIGNALWIRE INBOUND CALL WEBHOOK TEST ────────────────────────────────────
 app.post("/voice/inbound", async (req, res) => {
-  const callSid = req.body.CallSid;
-  const callerNumber = req.body.From;
+  console.log("Inbound test call received:", req.body);
 
-  console.log(`📞 Inbound call from ${callerNumber} | SID: ${callSid}`);
-
-  // Initialize a fresh conversation session
-  sessions.set(callSid, {
-    callSid,
-    callerNumber,
-    startTime: new Date(),
-    conversation: initConversation(),
-    transcript: [],
-    gathered: {},
-  });
+  res.type("text/xml");
+  res.send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>Thank you for calling Buford Lawn Care and Maintenance. This is Jordan, your virtual assistant. The test connection is working.</Say>
+  <Pause length="1"/>
+  <Say>Goodbye.</Say>
+  <Hangup/>
+</Response>`);
+});
 
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const twiml = new VoiceResponse();
