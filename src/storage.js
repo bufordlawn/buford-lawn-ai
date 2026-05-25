@@ -2,11 +2,13 @@ import { google } from "googleapis";
 import { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
 import { Readable } from "stream";
+import ws from "ws";
 
 // ─── SUPABASE CLIENT ──────────────────────────────────────────────────────────
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY // Use service key (not anon) for server-side
+  process.env.SUPABASE_SERVICE_KEY,
+  { realtime: { transport: ws } }
 );
 
 // ─── GOOGLE DRIVE AUTH ────────────────────────────────────────────────────────
@@ -26,7 +28,7 @@ export async function uploadToDrive({ callSid, callerNumber, recordingUrl, trans
   const drive = getDriveClient();
   const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
 
-  const dateStr = new Date(startTime).toISOString().slice(0, 10); // YYYY-MM-DD
+  const dateStr = new Date(startTime).toISOString().slice(0, 10);
   const safeNumber = callerNumber.replace(/[^0-9]/g, "");
   const baseName = `${dateStr}_${safeNumber}_${callSid.slice(-6)}`;
 
@@ -34,18 +36,17 @@ export async function uploadToDrive({ callSid, callerNumber, recordingUrl, trans
 
   // 1. Upload MP3 recording
   try {
-    console.log(`📤 Downloading recording from Twilio: ${recordingUrl}`);
+    console.log(`📤 Downloading recording from SignalWire: ${recordingUrl}`);
 
-    // Twilio requires auth to download recordings
-    const twilioAuth = Buffer.from(
+    const auth = Buffer.from(
       `${process.env.SIGNALWIRE_PROJECT_ID}:${process.env.SIGNALWIRE_API_TOKEN}`
     ).toString("base64");
 
     const audioResponse = await fetch(recordingUrl, {
-      headers: { Authorization: `Basic ${twilioAuth}` },
+      headers: { Authorization: `Basic ${auth}` },
     });
 
-    if (!audioResponse.ok) throw new Error(`Twilio fetch failed: ${audioResponse.status}`);
+    if (!audioResponse.ok) throw new Error(`Recording fetch failed: ${audioResponse.status}`);
 
     const audioBuffer = await audioResponse.buffer();
     const audioStream = Readable.from(audioBuffer);
@@ -114,7 +115,7 @@ export async function saveToSupabase({
       end_time,
       duration_seconds,
       transcript,
-      gathered_info, // JSONB column — stores the structured intake data
+      gathered_info,
       recording_drive_url,
       transcript_drive_url,
       recording_twilio_url,
