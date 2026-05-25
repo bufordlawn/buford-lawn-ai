@@ -1,12 +1,33 @@
-import twilio from "twilio";
 import nodemailer from "nodemailer";
+import fetch from "node-fetch";
 
-// ─── SIGNALWIRE CLIENT (uses Twilio SDK) ──────────────────────────────────────
-const signalwireClient = twilio(
-  process.env.SIGNALWIRE_PROJECT_ID,
-  process.env.SIGNALWIRE_API_TOKEN,
-  { signalwireSpaceUrl: process.env.SIGNALWIRE_SPACE_URL }
-);
+// ─── SIGNALWIRE SMS (direct REST API — no Twilio SDK needed) ──────────────────
+async function sendSignalWireSMS(to, body) {
+  const projectId = process.env.SIGNALWIRE_PROJECT_ID;
+  const token = process.env.SIGNALWIRE_API_TOKEN;
+  const spaceUrl = process.env.SIGNALWIRE_SPACE_URL;
+  const from = process.env.SIGNALWIRE_PHONE_NUMBER;
+
+  const url = `https://${spaceUrl}/api/laml/2010-04-01/Accounts/${projectId}/Messages.json`;
+  const auth = Buffer.from(`${projectId}:${token}`).toString("base64");
+
+  const params = new URLSearchParams({ From: from, To: to, Body: body });
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: params.toString(),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`SignalWire SMS failed: ${err}`);
+  }
+  return res.json();
+}
 
 // ─── GMAIL TRANSPORTER (App Password) ────────────────────────────────────────
 const transporter = nodemailer.createTransport({
@@ -20,19 +41,19 @@ const transporter = nodemailer.createTransport({
 // ─── FORMAT GATHERED INFO ─────────────────────────────────────────────────────
 function formatGathered(gathered) {
   const fields = [
-    ["Name",             gathered.name],
-    ["Service Address",  gathered.address],
-    ["Services",         Array.isArray(gathered.services) ? gathered.services.join(", ") : gathered.services],
-    ["Frequency",        gathered.frequency],
-    ["Callback Number",  gathered.callbackNumber],
-    ["Best Time",        gathered.bestTimeToCall],
-    ["Yard Size",        gathered.yardSize],
-    ["Gated",            gathered.gated],
-    ["Gate Code",        gathered.gateCode],
-    ["Obstacles",        gathered.obstacles],
-    ["Mulch Areas",      gathered.mulchAreas],
-    ["Mulch Color",      gathered.mulchColor],
-    ["Notes",            gathered.additionalNotes],
+    ["Name",            gathered.name],
+    ["Service Address", gathered.address],
+    ["Services",        Array.isArray(gathered.services) ? gathered.services.join(", ") : gathered.services],
+    ["Frequency",       gathered.frequency],
+    ["Callback Number", gathered.callbackNumber],
+    ["Best Time",       gathered.bestTimeToCall],
+    ["Yard Size",       gathered.yardSize],
+    ["Gated",           gathered.gated],
+    ["Gate Code",       gathered.gateCode],
+    ["Obstacles",       gathered.obstacles],
+    ["Mulch Areas",     gathered.mulchAreas],
+    ["Mulch Color",     gathered.mulchColor],
+    ["Notes",           gathered.additionalNotes],
   ];
 
   return fields
@@ -54,17 +75,13 @@ async function sendSMS({ callerNumber, startTime, durationSeconds, gathered, dri
   body += `Time: ${time} ET\n`;
   body += `Duration: ${duration}\n`;
   body += `Service: ${services}\n`;
-  if (gathered.name)           body += `Name: ${gathered.name}\n`;
-  if (gathered.address)        body += `Address: ${gathered.address}\n`;
-  if (gathered.callbackNumber) body += `Callback: ${gathered.callbackNumber}\n`;
+  if (gathered.name)            body += `Name: ${gathered.name}\n`;
+  if (gathered.address)         body += `Address: ${gathered.address}\n`;
+  if (gathered.callbackNumber)  body += `Callback: ${gathered.callbackNumber}\n`;
   if (driveLinks?.recordingUrl) body += `🎙 Recording: ${driveLinks.recordingUrl}`;
 
   try {
-    await signalwireClient.messages.create({
-      body,
-      from: process.env.SIGNALWIRE_PHONE_NUMBER,
-      to: process.env.NOTIFY_SMS_NUMBER,
-    });
+    await sendSignalWireSMS(process.env.NOTIFY_SMS_NUMBER, body);
     console.log("✅ SMS notification sent");
   } catch (err) {
     console.error("SMS send error:", err.message);
